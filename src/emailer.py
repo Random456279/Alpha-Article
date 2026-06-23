@@ -5,6 +5,8 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
+from . import config
+
 
 def send_email(subject, html_body, to_addr=None):
     user = os.environ.get("GMAIL_USER", "").strip()
@@ -16,10 +18,10 @@ def send_email(subject, html_body, to_addr=None):
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = f"The Alpha Article <{user}>"
+    msg["From"] = f"{config.PAPER_NAME} <{user}>"
     msg["To"] = to_addr
 
-    plain = "Your edition of The Alpha Article is best viewed as HTML."
+    plain = f"Your edition of {config.PAPER_NAME} is best viewed as HTML."
     msg.attach(MIMEText(plain, "plain", "utf-8"))
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 

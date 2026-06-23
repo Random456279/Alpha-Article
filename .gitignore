@@ -1,0 +1,7 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Local-only rendered previews (never committed)
+*_preview.html
+scratchpad/

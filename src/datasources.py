@@ -1,5 +1,5 @@
 """
-All external data fetching for The Alpha Article.
+All external data fetching for The River Report.
 
 Design rule: nothing in here is allowed to crash the run. Every fetch is wrapped
 so that a failure returns an empty/placeholder result and the paper still ships.
@@ -11,6 +11,7 @@ Sources used:
 """
 
 import os
+import re
 import time
 import datetime as dt
 from zoneinfo import ZoneInfo
@@ -25,8 +26,12 @@ NYT_KEY = os.environ.get("NYT_API_KEY", "").strip()
 FRED_KEY = os.environ.get("FRED_API_KEY", "").strip()
 
 POLYGON = "https://api.polygon.io"
+GUARDIAN = "https://content.guardianapis.com/search"
+NYT = "https://api.nytimes.com/svc/search/v2/articlesearch.json"
 HTTP_TIMEOUT = 25
-YIELD_SYMBOLS = {"^TNX", "^FVX", "^TYX", "^IRX"}
+# Symbols quoted as yields (shown as a % and changed in basis points). "2YY=F"
+# is the CBOT 2-Year micro-yield future used for the strip's 2-Year cell.
+YIELD_SYMBOLS = {"^TNX", "^FVX", "^TYX", "^IRX", "2YY=F"}
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +43,7 @@ def _fmt_value(symbol, v):
         return f"{v:,.2f}%"
     if symbol == "BTC-USD":
         return f"${v:,.0f}"
-    if symbol in ("CL=F", "GC=F"):
+    if symbol in ("CL=F", "GC=F", "SI=F"):
         return f"${v:,.2f}"
     if abs(v) >= 1000:
         return f"{v:,.0f}" if v == int(v) or abs(v) >= 10000 else f"{v:,.2f}"
@@ -133,15 +138,21 @@ def get_overseas():
 
 
 def get_sector_moves():
-    """{sector_name: {'change': '+1.1%', 'direction': 'up'}} from sector SPDR ETFs."""
-    etf_for = {name: etf for name, etf, _ in config.SECTORS}
-    quotes = _yahoo_batch(list(etf_for.values()))
+    """{sector_name: {'change': '+1.1%', 'direction': 'up'}} from sector SPDR ETFs.
+    A sector whose ETF field is a tuple (e.g. Consumer -> XLY+XLP) shows the
+    average of its constituent ETFs' percent moves."""
+    etf_lists = {name: (list(etf) if isinstance(etf, (list, tuple)) else [etf])
+                 for name, etf, _ in config.SECTORS}
+    symbols = sorted({s for lst in etf_lists.values() for s in lst})
+    quotes = _yahoo_batch(symbols)
     out = {}
-    for name, etf in etf_for.items():
-        if etf in quotes:
-            last, prior = quotes[etf]
-            change, direction = _fmt_change(etf, last, prior)
-            out[name] = {"change": change, "direction": direction}
+    for name, etfs in etf_lists.items():
+        pcts = [(last - prior) / abs(prior) * 100.0
+                for etf in etfs if etf in quotes
+                for last, prior in [quotes[etf]] if prior]
+        if pcts:
+            avg = sum(pcts) / len(pcts)
+            out[name] = {"change": f"{avg:+.2f}%", "direction": "up" if avg >= 0 else "down"}
         else:
             out[name] = {"change": "", "direction": "flat"}
     return out
@@ -385,7 +396,7 @@ def get_sector_desk():
     return desk
 
 
-def get_market_headlines(n=8):
+def get_market_headlines(n=16):
     """Latest market headlines, used for the lead and the overnight block."""
     news = _polygon_news(limit=50)
     out = []
@@ -406,25 +417,112 @@ def get_market_headlines(n=8):
 
 
 # ---------------------------------------------------------------------------
-# World / political desks (Guardian) -- activates once the free key is added
+# Regional desks (The Guardian + The New York Times)
+#
+# Six regional desks, each with a "Politics" and a "Macro & Markets"
+# sub-section, populated from the Guardian and NYT search APIs. Keys come from
+# GUARDIAN_API_KEY / NYT_API_KEY and may be empty -- every fetch is wrapped so a
+# missing key or a failure simply yields [] and the desk shows a placeholder.
+# Only the API-provided summary field (Guardian trailText / NYT abstract) is
+# used; full article bodies are never reprinted.
 # ---------------------------------------------------------------------------
-def get_guardian_section(section, n=None):
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _clean(text):
+    """Strip any HTML tags the summary fields carry and collapse whitespace."""
+    return _TAG_RE.sub("", str(text or "")).strip()
+
+
+def _guardian_search(section=None, q=None, n=None):
     n = n or config.NEWS_PER_BLOCK
     if not GUARDIAN_KEY:
         return []
+    params = {"page-size": n, "order-by": "newest",
+              "show-fields": "trailText", "api-key": GUARDIAN_KEY}
+    if section:
+        params["section"] = section
+    if q:
+        params["q"] = q
     try:
-        r = requests.get(
-            "https://content.guardianapis.com/search",
-            params={"section": section, "page-size": n,
-                    "order-by": "newest", "api-key": GUARDIAN_KEY},
-            timeout=HTTP_TIMEOUT)
+        r = requests.get(GUARDIAN, params=params, timeout=HTTP_TIMEOUT)
         if r.status_code != 200:
             return []
         results = r.json().get("response", {}).get("results", []) or []
-        return [{"title": x.get("webTitle", ""), "url": x.get("webUrl", ""),
-                 "publisher": "The Guardian"} for x in results]
+        out = []
+        for x in results:
+            fields = x.get("fields") or {}
+            out.append({"title": x.get("webTitle", ""),
+                        "url": x.get("webUrl", ""),
+                        "summary": _clean(fields.get("trailText", "")),
+                        "publisher": "The Guardian"})
+        return out
     except Exception:
         return []
+
+
+def _nyt_search(q=None, n=None):
+    n = n or config.NEWS_PER_BLOCK
+    if not NYT_KEY:
+        return []
+    params = {"sort": "newest", "api-key": NYT_KEY}
+    if q:
+        params["q"] = q
+    try:
+        r = requests.get(NYT, params=params, timeout=HTTP_TIMEOUT)
+        if r.status_code != 200:
+            return []
+        docs = r.json().get("response", {}).get("docs", []) or []
+        out = []
+        for d in docs[:n]:
+            headline = (d.get("headline") or {}).get("main", "")
+            out.append({"title": headline,
+                        "url": d.get("web_url", ""),
+                        "summary": _clean(d.get("abstract") or d.get("snippet")),
+                        "publisher": "The New York Times"})
+        return out
+    except Exception:
+        return []
+
+
+def _region_stories(region, kind):
+    """Stories for one desk's sub-section. kind is 'politics' or 'macro'."""
+    g = region.get("guardian", {})
+    q = region.get("query")
+    if kind == "politics":
+        guardian = _guardian_search(section=g.get("politics"), q=q)
+        nyt = _nyt_search(q=(f"{q} politics" if q else "politics"))
+    else:
+        macro_q = f"{q} economy markets" if q else "economy markets"
+        guardian = _guardian_search(section=g.get("macro"), q=q)
+        nyt = _nyt_search(q=macro_q)
+
+    seen, out = set(), []
+    for story in (guardian + nyt):
+        title = (story.get("title") or "").strip()
+        if title and title not in seen:
+            seen.add(title)
+            out.append(story)
+        if len(out) >= config.NEWS_PER_BLOCK:
+            break
+    return out
+
+
+def get_regional_desks():
+    """Return the six regional desks, each {name, politics:[...], macro:[...]}.
+    Each story: {title, summary, url, publisher}. Never raises."""
+    desks = []
+    for region in config.REGIONAL_DESKS:
+        try:
+            politics = _region_stories(region, "politics")
+        except Exception:
+            politics = []
+        try:
+            macro = _region_stories(region, "macro")
+        except Exception:
+            macro = []
+        desks.append({"name": region["name"], "politics": politics, "macro": macro})
+    return desks
 
 
 # ---------------------------------------------------------------------------

@@ -2,13 +2,14 @@
 Main entry point. Run as:  python -m src.build --edition evening
 or                          python -m src.build --edition morning
 
-Gathers data, renders the Alpha Article, writes the browser edition into docs/
+Gathers data, renders The River Report, writes the browser edition into docs/
 (served by GitHub Pages), and emails it to you. Designed so that a single
 failing data source never stops the edition from going out.
 """
 
 import argparse
 import datetime as dt
+import json
 import os
 import sys
 import traceback
@@ -20,6 +21,14 @@ from . import config, datasources as ds, render, emailer
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
 ARCHIVE = DOCS / "archive"
+
+# Persisted, repo-committed issue counter. Numbering starts at Vol. 1, No. 1 for
+# the first edition published on or after ISSUE_EPOCH and advances by one for
+# every edition sent (morning and evening each advance it). No. rolls 1..100,
+# then the volume increments and No. resets to 1.
+COUNTER = DOCS / "issue_counter.json"
+ISSUE_EPOCH = dt.date(2026, 6, 24)
+ISSUES_PER_VOLUME = 100
 
 
 def _safe(fn, default):
@@ -47,13 +56,38 @@ def _index_levels(strip_rows):
     return out
 
 
-def _world_desks():
-    return [
-        ("U.S. Politics", _safe(lambda: ds.get_guardian_section("us-news"), [])),
-        ("U.S. Macro & Markets", _safe(lambda: ds.get_guardian_section("business"), [])),
-        ("Global Politics", _safe(lambda: ds.get_guardian_section("world"), [])),
-        ("Europe & U.K.", _safe(lambda: ds.get_guardian_section("politics"), [])),
-    ]
+def assign_issue(edition, today):
+    """Return {"volume", "number"} for this edition, advancing and persisting the
+    committed counter. Re-running the same date+edition does not double-count.
+    Numbering only begins on/after ISSUE_EPOCH."""
+    key = f"{today.isoformat()}-{edition}"
+    try:
+        c = json.loads(COUNTER.read_text(encoding="utf-8"))
+    except Exception:
+        c = None
+
+    # Already counted this exact edition (a re-run): reuse, do not advance.
+    if c and c.get("last_edition_key") == key:
+        return {"volume": c["volume"], "number": c["number"]}
+
+    started = bool(c and c.get("number"))  # any issue published yet?
+
+    # Before launch with nothing published: show 1/1 but don't consume it.
+    if today < ISSUE_EPOCH and not started:
+        return {"volume": 1, "number": 1}
+
+    if not started:
+        vol, num = 1, 1
+    else:
+        vol, num = c["volume"], c["number"] + 1
+        if num > ISSUES_PER_VOLUME:
+            vol, num = vol + 1, 1
+
+    DOCS.mkdir(exist_ok=True)
+    COUNTER.write_text(json.dumps(
+        {"epoch": ISSUE_EPOCH.isoformat(), "volume": vol, "number": num,
+         "last_edition_key": key}, indent=2) + "\n", encoding="utf-8")
+    return {"volume": vol, "number": num}
 
 
 def gather(edition):
@@ -63,7 +97,7 @@ def gather(edition):
         "strip": strip,
         "headlines": _safe(lambda: ds.get_market_headlines(), []),
         "sector_desk": _safe(lambda: ds.get_sector_desk(), []),
-        "world": _world_desks(),
+        "regions": _safe(lambda: ds.get_regional_desks(), []),
         "calendar": _safe(lambda: ds.get_calendar(), {"economic": [], "earnings": [], "connected": False}),
     }
     if edition == "evening":
@@ -103,7 +137,10 @@ def main():
     archive_name = f"{now.date().isoformat()}-{args.edition}.html"
     browser_url = (base + f"archive/{archive_name}") if base else ""
 
-    html_out = render.render(args.edition, data, browser_url=browser_url)
+    issue = assign_issue(args.edition, now.date())
+    print(f"Issue: Vol. {issue['volume']} No. {issue['number']}")
+
+    html_out = render.render(args.edition, data, browser_url=browser_url, issue=issue)
 
     DOCS.mkdir(exist_ok=True)
     ARCHIVE.mkdir(exist_ok=True)
@@ -119,8 +156,12 @@ def main():
     edition_label = "Morning Edition" if args.edition == "morning" else "Evening Edition"
     date_str = now.strftime("%B %d, %Y")
     subject = f"{config.PAPER_NAME}: {edition_label}, {date_str}"
+    # The web edition (docs/index.html + archive) uses render.render() above.
+    # Gmail strips <style>/web fonts/modern CSS, so the email body uses the
+    # inline, table-based render.render_email() twin instead.
+    email_html = render.render_email(args.edition, data, browser_url=browser_url, issue=issue)
     try:
-        sent_to = emailer.send_email(subject, html_out)
+        sent_to = emailer.send_email(subject, email_html)
         print(f"Emailed the {args.edition} edition to {sent_to}.")
     except Exception:
         traceback.print_exc()
