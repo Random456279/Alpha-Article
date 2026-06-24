@@ -30,6 +30,24 @@ COUNTER = DOCS / "issue_counter.json"
 ISSUE_EPOCH = dt.date(2026, 6, 24)
 ISSUES_PER_VOLUME = 100
 
+# Per-edition record of the last calendar day an edition actually emailed. Used
+# to dedupe: GitHub's free cron fires late and unpredictably, so a late run and
+# an on-time run can both clear the time gate on the same day. We only ever want
+# one morning and one evening send per day.
+LAST_SENT = DOCS / "last_sent.json"
+
+# Generous send windows (minutes past midnight, America/Chicago). GitHub's cron
+# routinely fires hours late, so an exact-hour gate dropped almost every run.
+# These windows are wide enough to catch late runs but still block the
+# off-season duplicate cron from firing at a wildly wrong hour.
+MORNING_WINDOW = (6 * 60 + 30, 12 * 60)       # 06:30 .. 12:00
+EVENING_WINDOW = (16 * 60, 21 * 60 + 30)      # 16:00 .. 21:30
+
+
+def _is_manual_dispatch():
+    """True for a manual 'Run workflow' (workflow_dispatch) trigger."""
+    return os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+
 
 def _safe(fn, default):
     try:
@@ -109,11 +127,34 @@ def gather(edition):
 
 
 def time_gate_ok(edition):
-    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+    if _is_manual_dispatch():
         return True  # manual "Run workflow" always sends, for testing
     now = dt.datetime.now(ZoneInfo(config.TIMEZONE))
-    target = config.MORNING_HOUR if edition == "morning" else config.EVENING_HOUR
-    return now.hour == target
+    minutes = now.hour * 60 + now.minute
+    start, end = MORNING_WINDOW if edition == "morning" else EVENING_WINDOW
+    return start <= minutes <= end
+
+
+def already_sent_today(edition, today):
+    """True if this edition has already emailed on `today` (per last_sent.json)."""
+    try:
+        data = json.loads(LAST_SENT.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return isinstance(data, dict) and data.get(edition) == today.isoformat()
+
+
+def record_sent(edition, today):
+    """Mark this edition as sent on `today` so a later run won't duplicate it."""
+    try:
+        data = json.loads(LAST_SENT.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    data[edition] = today.isoformat()
+    DOCS.mkdir(exist_ok=True)
+    LAST_SENT.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def main():
@@ -127,6 +168,16 @@ def main():
         now = dt.datetime.now(ZoneInfo(config.TIMEZONE))
         print(f"Outside the {args.edition} send window "
               f"(Central time is {now.strftime('%H:%M')}). Skipping.")
+        return 0
+
+    # Dedupe: a late cron + an on-time cron can both clear the window on the same
+    # day. If this edition already emailed today, skip — unless this is a manual
+    # dispatch (override for testing) or we're not emailing at all (--no-email).
+    today = dt.datetime.now(ZoneInfo(config.TIMEZONE)).date()
+    if not _is_manual_dispatch() and not args.no_email \
+            and already_sent_today(args.edition, today):
+        print(f"The {args.edition} edition already went out today "
+              f"({today.isoformat()}). Skipping to avoid a duplicate.")
         return 0
 
     print(f"Building the {args.edition} edition...")
@@ -162,6 +213,7 @@ def main():
     email_html = render.render_email(args.edition, data, browser_url=browser_url, issue=issue)
     try:
         sent_to = emailer.send_email(subject, email_html)
+        record_sent(args.edition, now.date())
         print(f"Emailed the {args.edition} edition to {sent_to}.")
     except Exception:
         traceback.print_exc()
