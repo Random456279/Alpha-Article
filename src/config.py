@@ -126,33 +126,140 @@ MIN_PRICE = 3.0
 # How many headlines to show per news block / per regional sub-section.
 NEWS_PER_BLOCK = 4
 
-# Six regional desks, in display order. Each desk renders two sub-sections,
-# "Politics" and "Macro & Markets", populated from The Guardian and the NYT
-# (keys in env vars GUARDIAN_API_KEY / NYT_API_KEY; empty -> desks degrade to a
-# "No items this cycle" note). For each desk:
-#   guardian.politics / guardian.macro : Guardian section slugs to pull from
-#   query                              : keyword filter (Guardian q= and NYT q=)
-#                                        narrowing the desk to its region
-# "The Rest of the World" is the catch-all for everything the five named desks
-# do not cover (Middle East, Africa, Central/South Asia, Oceania, Antarctica).
-REGIONAL_DESKS = [
-    {"name": "Washington",
-     "guardian": {"politics": "us-news", "macro": "business"},
-     "query": "United States"},
-    {"name": "Europe & U.K.",
-     "guardian": {"politics": "politics", "macro": "business"},
-     "query": "Europe OR \"United Kingdom\" OR Britain OR eurozone"},
-    {"name": "China",
-     "guardian": {"politics": "world", "macro": "business"},
-     "query": "China OR Beijing OR Hong Kong"},
-    {"name": "Japan",
-     "guardian": {"politics": "world", "macro": "business"},
-     "query": "Japan OR Tokyo OR \"Bank of Japan\""},
-    {"name": "South America",
-     "guardian": {"politics": "world", "macro": "business"},
-     "query": "\"South America\" OR Brazil OR Argentina OR Chile OR Colombia OR Peru"},
-    {"name": "The Rest of the World",
-     "guardian": {"politics": "world", "macro": "business"},
-     "query": ("\"Middle East\" OR Africa OR India OR Pakistan OR Australia "
-               "OR Oceania OR \"Central Asia\"")},
+# Polygon's news firehose is mostly PR-wire spam, paid-promotion pieces, and
+# class-action "investor alert" filings. We keep ONLY articles whose publisher
+# name contains one of these (case-insensitive substring; "ap" is matched as a
+# whole word so it doesn't swallow unrelated names). This drops Motley Fool,
+# Zacks, GlobeNewswire, PR Newswire, Business Wire, Benzinga-PR, etc.
+NEWS_PUBLISHER_ALLOWLIST = [
+    "reuters", "associated press", "ap", "cnbc", "marketwatch", "barron",
+    "bloomberg", "wall street journal", "financial times", "forbes",
+    "investor's business daily", "yahoo finance",
 ]
+
+# Drop any headline whose title contains one of these spam markers (the
+# law-firm "shareholder rights / class action / deadline" boilerplate).
+NEWS_TITLE_BLOCKLIST = [
+    "class action", "lawsuit", "investor alert", "deadline", "law firm",
+    "shareholder rights", "reminds investors", "encourages investors",
+    "investigation on behalf", "to recover losses", "rosen law", "pomerantz",
+    "bragar", "halper sadeh", "schall law",
+]
+
+# Term sets used to split each regional desk into Politics vs Macro & Markets.
+NEWS_MACRO_TERMS = [
+    "econom", "market", "stock", "shares", "bond", "yield", "inflation",
+    "interest rate", "central bank", "gdp", "currency", "tariff", "trade",
+    "earnings", "ipo", "investor", "budget", "deficit", "fiscal", "monetary",
+    "commodit", "recession", "unemployment", "jobs report", "rate cut",
+    "rate hike", "dollar", "equit", "fed", "ecb", "boj", "pboc",
+]
+NEWS_POLITICS_TERMS = [
+    "politic", "election", "government", "parliament", "president",
+    "prime minister", "minister", "congress", "senate", "vote", "diploma",
+    "sanction", "military", "troops", "summit", "protest", "coup", "cabinet",
+    "legislat", "border", "immigration", "war",
+]
+
+# Six regional desks, in display order. Each desk renders two sub-sections,
+# "Politics" and "Macro & Markets". Stories are pulled in bulk from The Guardian
+# and the NYT, then assigned to EXACTLY ONE desk by strict keyword matching (see
+# datasources.get_regional_desks). No story may appear in more than one desk.
+REGION_ORDER = [
+    "Washington", "Europe & U.K.", "China", "Japan", "South America",
+    "The Rest of the World",
+]
+
+# Per-region keyword sets used for that strict assignment.
+#   specific : a named country / capital / institution (match weight 2)
+#   generic  : a broad regional term that a more specific match should beat (1)
+#   priority : tie-break when two regions match at the SAME weight; lower wins.
+#              Foreign-specific desks outrank Washington so a globally-relevant
+#              "US" mention can't pull a foreign story into Washington.
+# "The Rest of the World" is BOTH a keyword desk (Middle East, Africa, South
+# Asia, Oceania, Korea, etc.) AND the catch-all for stories matching nothing.
+# NOTE: Korea/North Korea live here, NOT under China. The U.K. lives under
+# Europe, never anywhere else.
+REGION_KEYWORDS = {
+    "Washington": {
+        "priority": 6,
+        "specific": [
+            "washington", "white house", "congress", "senate", "federal reserve",
+            "wall street", "biden", "trump", "sec", "treasury",
+            # US states (Georgia omitted: it collides with the country)
+            "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
+            "connecticut", "delaware", "florida", "hawaii", "idaho", "illinois",
+            "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine",
+            "maryland", "massachusetts", "michigan", "minnesota", "mississippi",
+            "missouri", "montana", "nebraska", "nevada", "new hampshire",
+            "new jersey", "new mexico", "new york", "north carolina",
+            "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania",
+            "rhode island", "south carolina", "south dakota", "tennessee",
+            "texas", "utah", "vermont", "virginia", "west virginia",
+            "wisconsin", "wyoming",
+        ],
+        "generic": ["united states", "u.s.", "us", "fed", "republican",
+                    "democrat", "gop"],
+    },
+    "Europe & U.K.": {
+        "priority": 3,
+        "specific": [
+            "united kingdom", "u.k.", "uk", "britain", "british", "england",
+            "scotland", "wales", "london", "brexit", "ecb", "germany", "france",
+            "italy", "spain", "netherlands", "brussels", "european union",
+            "ukraine", "russia", "poland", "greece", "ireland", "berlin",
+            "paris", "madrid", "rome", "moscow", "kyiv", "labour", "tory",
+            "downing street",
+        ],
+        "generic": ["europe", "european", "eurozone", "eu"],
+    },
+    "China": {
+        "priority": 1,
+        "specific": [
+            "china", "chinese", "beijing", "shanghai", "shenzhen", "hong kong",
+            "xi jinping", "taiwan", "taipei", "pboc", "hang seng", "csi 300",
+        ],
+        "generic": ["yuan", "renminbi"],
+    },
+    "Japan": {
+        "priority": 2,
+        "specific": [
+            "japan", "japanese", "tokyo", "nikkei", "boj", "bank of japan",
+            "yen", "topix",
+        ],
+        "generic": [],
+    },
+    "South America": {
+        "priority": 4,
+        "specific": [
+            "brazil", "brazilian", "argentina", "argentine", "chile", "colombia",
+            "peru", "venezuela", "bolivia", "uruguay", "paraguay", "ecuador",
+            "brasilia", "sao paulo", "buenos aires", "santiago", "bogota",
+            "lima", "caracas", "lula", "milei", "petro",
+        ],
+        "generic": ["south america", "latin america", "mercosur"],
+    },
+    "The Rest of the World": {
+        "priority": 5,
+        "specific": [
+            "india", "indian", "mumbai", "delhi", "middle east", "iran",
+            "tehran", "israel", "israeli", "gaza", "palestin", "saudi",
+            "riyadh", "uae", "united arab emirates", "dubai", "abu dhabi",
+            "qatar", "africa", "nigeria", "south africa", "johannesburg",
+            "kenya", "egypt", "cairo", "turkey", "ankara", "istanbul",
+            "australia", "australian", "sydney", "new zealand", "korea",
+            "north korea", "south korea", "seoul", "pyongyang", "pakistan",
+            "indonesia", "vietnam", "thailand", "singapore", "philippines",
+            "malaysia", "antarctica",
+        ],
+        "generic": [],
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Forward calendar ("The Day Ahead"). Free, keyless sources.
+# ---------------------------------------------------------------------------
+# Notable companies to list in the earnings calendar (most by market cap).
+CAL_EARNINGS_N = 12
+# Economic releases to list (today + tomorrow, US).
+CAL_ECON_N = 14

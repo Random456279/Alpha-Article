@@ -158,9 +158,16 @@ def _movers_section(all_movers, index_levels):
         if lvl:
             arrow = _arrow(lvl.get("direction", "flat"))
             px = f'{_e(lvl.get("value",""))} &middot; {arrow} {_e(lvl.get("change",""))}'
+        idxh = (f'<div class="idxh"><span class="nm">{_e(idx)}</span>'
+                f'<span class="px">{px}</span></div>')
+        if data.get("unavailable") and not (data["winners"] or data["losers"]):
+            blocks.append(
+                f'<div class="idx">{idxh}'
+                '<div class="muted">Membership data unavailable this cycle; '
+                'movers withheld rather than show non-members.</div></div>')
+            continue
         blocks.append(
-            f'<div class="idx"><div class="idxh"><span class="nm">{_e(idx)}</span>'
-            f'<span class="px">{px}</span></div>'
+            f'<div class="idx">{idxh}'
             f'<div class="mv"><div class="mvcol">'
             f'<div class="cap"><span>Winners</span><span>\u25B2</span></div>'
             f'{_movers_table(data["winners"])}</div>'
@@ -462,13 +469,22 @@ def _email_movers_section(all_movers, index_levels):
         if lvl:
             arrow = _arrow(lvl.get("direction", "flat"))
             px = f'{_e(lvl.get("value",""))} &middot; {arrow} {_e(lvl.get("change",""))}'
-        blocks.append(
+        head = (
             _etable("margin-bottom:16px;") +
             f'<tr><td style="font-family:{_EFONT};border-bottom:1.5px solid {_EINK};'
             f'padding-bottom:3px;font-weight:bold;font-size:15px;color:{_EINK};">'
             f'{_e(idx)}</td>'
             f'<td align="right" style="font-family:{_EFONT};border-bottom:1.5px solid '
-            f'{_EINK};padding-bottom:3px;font-size:12px;color:{_EINK};">{px}</td></tr>'
+            f'{_EINK};padding-bottom:3px;font-size:12px;color:{_EINK};">{px}</td></tr>')
+        if data.get("unavailable") and not (data["winners"] or data["losers"]):
+            blocks.append(
+                head + '<tr><td colspan="2" style="padding-top:5px;font-family:'
+                f'{_EFONT};font-size:12px;font-style:italic;color:#6a6a6a;">'
+                'Membership data unavailable this cycle; movers withheld rather '
+                'than show non-members.</td></tr></table>')
+            continue
+        blocks.append(
+            head +
             f'<tr><td colspan="2" style="padding-top:7px;">' +
             _etable() + '<tr>'
             f'<td width="50%" valign="top" style="padding-right:12px;">' +
